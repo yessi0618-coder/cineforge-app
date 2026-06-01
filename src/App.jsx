@@ -111,6 +111,37 @@ function drawCinematicBg(ctx, sceneIdx) {
   ctx.fillStyle = glow; ctx.fillRect(0, 0, W, H);
 }
 
+// Compute scene time ranges from split points or word-count distribution
+function computeSceneRanges(totalDur, sceneTexts, customSplits) {
+  const n = sceneTexts.length;
+  if (!n || !totalDur) return [];
+  // Use custom splits if provided and valid
+  if (customSplits && customSplits.length === n) {
+    return customSplits.map((start, i) => ({
+      start,
+      end: i < n - 1 ? customSplits[i + 1] : totalDur,
+      dur: (i < n - 1 ? customSplits[i + 1] : totalDur) - start,
+    }));
+  }
+  // Auto: distribute by word count
+  const wc = sceneTexts.map(t => t.split(/\s+/).filter(Boolean).length);
+  const tw = wc.reduce((a, b) => a + b, 0) || 1;
+  let cursor = 0;
+  return wc.map(w => {
+    const dur = (w / tw) * totalDur;
+    const range = { start: cursor, end: cursor + dur, dur };
+    cursor += dur;
+    return range;
+  });
+}
+
+function fmtTime(s) {
+  const m = Math.floor(s / 60);
+  const sec = Math.floor(s % 60);
+  const ms = Math.floor((s % 1) * 10);
+  return `${String(m).padStart(2,'0')}:${String(sec).padStart(2,'0')}.${ms}`;
+}
+
 function roundRect(ctx,x,y,w,h,r=6){
   ctx.beginPath();ctx.moveTo(x+r,y);ctx.lineTo(x+w-r,y);ctx.quadraticCurveTo(x+w,y,x+w,y+r);
   ctx.lineTo(x+w,y+h-r);ctx.quadraticCurveTo(x+w,y+h,x+w-r,y+h);ctx.lineTo(x+r,y+h);
@@ -180,17 +211,46 @@ function KeyField({label,link,linkLabel,value,onChange,hint,show,onToggle,placeh
 const iStyle = (ex={}) => ({width:"100%",background:"#0d0d10",border:"1px solid #1e1e2a",borderRadius:10,padding:"11px 14px",color:"#d0d0e0",fontSize:14,fontFamily:"inherit",boxSizing:"border-box",...ex});
 const modeBtn = (active,color="#4f8ef7") => ({flex:1,padding:"11px 16px",borderRadius:10,cursor:"pointer",fontWeight:700,fontSize:13,background:active?color+"22":"#0d0d10",border:`1.5px solid ${active?color:"#1e1e2a"}`,color:active?color:"#445",fontFamily:"inherit",transition:"all .2s"});
 
-// ── Scene preview card shown before build ─────────────────────────────────────
-function ScenePreviewCard({ scene, idx, result }) {
-  const hasImg = result?.img;
-  const isFallback = result && !result.img;
+// ── Scene preview card with image swap ────────────────────────────────────────
+function ScenePreviewCard({ scene, idx, result, onSwap }) {
+  const [searching, setSearching] = useState(false);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [showSearch, setShowSearch] = useState(false);
+  const [searchResults, setSearchResults] = useState([]);
+  const [searchError, setSearchError] = useState("");
+
+  const hasImg   = result?.img;
   const isWaiting = !result;
   const statusColor = isWaiting ? "#334" : hasImg ? "#00C896" : "#f59e0b";
-  const statusText  = isWaiting ? "Fetching..." : hasImg ? `✓ ${result.photographer}` : "~ gradient fallback";
+
+  const doSearch = async () => {
+    if (!searchQuery.trim()) return;
+    setSearching(true); setSearchError(""); setSearchResults([]);
+    try {
+      const url = `${PROXY_BASE}?query=${encodeURIComponent(searchQuery)}&per_page=6&orientation=landscape&size=large`;
+      const r = await fetch(url);
+      if (!r.ok) throw new Error("Search failed");
+      const data = await r.json();
+      setSearchResults(data.photos || []);
+      if ((data.photos||[]).length === 0) setSearchError("No results — try different keywords");
+    } catch(e) { setSearchError(e.message); }
+    setSearching(false);
+  };
+
+  const pickPhoto = async (photo) => {
+    const src = photo.src?.large2x || photo.src?.large || photo.src?.medium;
+    if (!src) return;
+    const img = await loadImageForCanvas(src);
+    if (img) {
+      onSwap(idx, { img, url: src, photographer: photo.photographer });
+      setShowSearch(false); setSearchResults([]); setSearchQuery("");
+    }
+  };
 
   return (
     <div style={{background:"#0d0d12",border:`1px solid ${statusColor}30`,borderRadius:12,overflow:"hidden",transition:"border-color .3s"}}>
-      <div style={{height:90,background:"#0a0a10",position:"relative",overflow:"hidden"}}>
+      {/* Thumbnail */}
+      <div style={{height:100,background:"#0a0a10",position:"relative",overflow:"hidden"}}>
         {hasImg ? (
           <img src={result.url} alt="" crossOrigin="anonymous"
             style={{width:"100%",height:"100%",objectFit:"cover",opacity:0.9}}
@@ -200,13 +260,70 @@ function ScenePreviewCard({ scene, idx, result }) {
             {isWaiting ? "⏳" : "🎨"}
           </div>
         )}
-        <div style={{position:"absolute",top:6,left:6,background:"rgba(0,0,0,0.75)",borderRadius:4,padding:"2px 7px",fontSize:10,fontWeight:700,color:"#ccc"}}>SC{String(idx+1).padStart(2,"0")}</div>
+        <div style={{position:"absolute",top:6,left:6,background:"rgba(0,0,0,0.75)",borderRadius:4,padding:"2px 6px",fontSize:10,fontWeight:700,color:"#ccc"}}>SC{String(idx+1).padStart(2,"0")}</div>
+        {/* Swap button — always visible on hover via opacity trick */}
+        {!isWaiting && (
+          <button onClick={()=>setShowSearch(s=>!s)} style={{
+            position:"absolute",top:6,right:6,
+            background:"rgba(0,0,0,0.75)",border:"1px solid #ffffff30",
+            borderRadius:6,padding:"3px 8px",fontSize:10,color:"#ccc",
+            cursor:"pointer",fontFamily:"inherit"
+          }}>🔄 Swap</button>
+        )}
         {hasImg && <div style={{position:"absolute",bottom:0,left:0,right:0,height:24,background:"linear-gradient(transparent,rgba(0,0,0,0.7))"}}/>}
       </div>
-      <div style={{padding:"8px 12px"}}>
-        <div style={{color:"#667",fontSize:10,marginBottom:3,fontFamily:"monospace"}}>"{scene.query}"</div>
-        <div style={{color:statusColor,fontSize:10,fontWeight:600}}>{statusText}</div>
+
+      {/* Info row */}
+      <div style={{padding:"7px 10px",display:"flex",alignItems:"center",justifyContent:"space-between"}}>
+        <div>
+          <div style={{color:"#556",fontSize:10,fontFamily:"monospace",marginBottom:2}}>"{scene.query}"</div>
+          <div style={{color:statusColor,fontSize:10,fontWeight:600}}>
+            {isWaiting ? "⏳ Fetching..." : hasImg ? `✓ ${result.photographer}` : "~ gradient fallback"}
+          </div>
+        </div>
       </div>
+
+      {/* Search panel */}
+      {showSearch && (
+        <div style={{borderTop:"1px solid #1a1a2a",padding:"10px",background:"#080810"}}>
+          <div style={{color:"#556",fontSize:11,marginBottom:7,fontWeight:600}}>Search for a different image:</div>
+          <div style={{display:"flex",gap:6,marginBottom:8}}>
+            <input
+              value={searchQuery}
+              onChange={e=>setSearchQuery(e.target.value)}
+              onKeyDown={e=>e.key==="Enter"&&doSearch()}
+              placeholder="e.g. ocean sunset, city skyline..."
+              style={{flex:1,background:"#0d0d14",border:"1px solid #1e1e2a",borderRadius:7,padding:"7px 10px",color:"#d0d0e0",fontSize:12,fontFamily:"inherit"}}
+            />
+            <button onClick={doSearch} disabled={searching||!searchQuery.trim()} style={{
+              background:"#1a2040",border:"1px solid #4f8ef750",borderRadius:7,
+              padding:"7px 12px",color:"#90a8f0",fontSize:12,cursor:"pointer",
+              fontFamily:"inherit",fontWeight:600,whiteSpace:"nowrap"
+            }}>{searching?"...":"Search"}</button>
+          </div>
+          {searchError && <div style={{color:"#f59e0b",fontSize:11,marginBottom:6}}>{searchError}</div>}
+          {/* Search results grid */}
+          {searchResults.length > 0 && (
+            <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:5}}>
+              {searchResults.map(p=>(
+                <div key={p.id} onClick={()=>pickPhoto(p)} style={{
+                  height:60,borderRadius:6,overflow:"hidden",cursor:"pointer",
+                  border:"1px solid #1a1a2a",position:"relative",
+                  transition:"border-color .15s"
+                }}>
+                  <img src={p.src?.medium||p.src?.small} alt={p.photographer}
+                    style={{width:"100%",height:"100%",objectFit:"cover",opacity:0.85}}/>
+                  <div style={{position:"absolute",inset:0,background:"rgba(0,0,0,0)",transition:"background .15s",display:"flex",alignItems:"center",justifyContent:"center"}}>
+                    <span style={{color:"#fff",fontSize:16,opacity:0,transition:"opacity .15s"}}>✓</span>
+                  </div>
+                  <div style={{position:"absolute",bottom:0,left:0,right:0,background:"rgba(0,0,0,0.6)",padding:"2px 4px",fontSize:9,color:"#aaa",overflow:"hidden",whiteSpace:"nowrap",textOverflow:"ellipsis"}}>{p.photographer}</div>
+                </div>
+              ))}
+            </div>
+          )}
+          <button onClick={()=>{setShowSearch(false);setSearchResults([]);setSearchQuery("");}} style={{marginTop:8,background:"none",border:"none",color:"#445",fontSize:11,cursor:"pointer",fontFamily:"inherit"}}>✕ Cancel</button>
+        </div>
+      )}
     </div>
   );
 }
@@ -223,11 +340,18 @@ export default function CineForge() {
   const [voiceId, setVoiceId] = useState(EL_VOICES[0].id);
   const [title, setTitle]     = useState("");
   const [script, setScript]   = useState("");
+  // Structured scenes: [{narration, visual}]
+  const [structuredScenes, setStructuredScenes] = useState([{narration:"",visual:""}]);
+  const [scriptInputMode, setScriptInputMode] = useState("structured"); // "structured" | "plain"
   const [aiBrief, setAiBrief] = useState({topic:"",audience:"General",tone:"Educational"});
   const [genLoading, setGenLoading] = useState(false);
   const [audioFile, setAudioFile]   = useState(null);
   const [audioURL, setAudioURL]     = useState(null);
   const [audioDur, setAudioDur]     = useState(null);
+  // Custom audio split points per scene (in seconds). null = auto by word count
+  const [splitPoints, setSplitPoints] = useState([]); // array of start times, length = scenes
+  const [playingScene, setPlayingScene] = useState(null); // idx of scene being previewed
+  const audioPreviewRef = useRef(null);
   const [subStyle, setSubStyle]     = useState("bold");
   const [overlay, setOverlay]       = useState("dark");
   const [showTitleCard, setShowTitleCard] = useState(true);
@@ -244,7 +368,15 @@ export default function CineForge() {
 
   const canvasRef = useRef(null);
   const logRef    = useRef(null);
-  const scenes    = parseScenes(script);
+  // Derive final script from structured scenes or plain text
+  const derivedScript = scriptInputMode === "structured"
+    ? structuredScenes.filter(s=>s.narration.trim()).map(s=>s.narration.trim()).join("\n\n")
+    : script;
+  const scenes = parseScenes(derivedScript);
+  // Build visual queries: use visual field if set, else auto-extract from narration
+  const sceneVisuals = scriptInputMode === "structured"
+    ? structuredScenes.filter(s=>s.narration.trim()).map(s=>s.visual.trim()||null)
+    : scenes.map(()=>null);
 
   useEffect(()=>{ if(logRef.current) logRef.current.scrollTop=9999; },[buildLog]);
   const log = msg => setBuildLog(l=>[...l,{t:new Date().toLocaleTimeString("en",{hour12:false,hour:"2-digit",minute:"2-digit",second:"2-digit"}),msg}]);
@@ -260,7 +392,9 @@ export default function CineForge() {
     for(let i=0;i<sceneList.length;i++){
       const sc=sceneList[i];
       try {
-        const result = await fetchSceneImage(sc.query);
+        // Use visual direction if provided, otherwise use auto-extracted query
+        const visualQuery = sceneVisuals[i] || sc.query;
+        const result = await fetchSceneImage(visualQuery);
         results.push(result);
         setSceneImages(prev=>{ const n=[...prev]; n[i]=result||{img:null,url:null,photographer:"gradient fallback"}; return n; });
       } catch(e) {
@@ -288,7 +422,15 @@ export default function CineForge() {
     try{
       const res=await fetch("https://api.anthropic.com/v1/messages",{method:"POST",headers:{"Content-Type":"application/json","x-api-key":anthropicKey.trim(),"anthropic-version":"2023-06-01","anthropic-dangerous-direct-browser-access":"true"},body:JSON.stringify({model:"claude-sonnet-4-20250514",max_tokens:3000,messages:[{role:"user",content:`Write a compelling educational video narration script.\n\nTitle: "${title||aiBrief.topic}"\nTopic: ${aiBrief.topic}\nAudience: ${aiBrief.audience}\nTone: ${aiBrief.tone}\nTarget: 5-7 minutes (~700-900 words)\n\nRules:\n- 6-9 paragraphs separated by blank lines\n- Each paragraph = one visual scene (4-8 sentences)\n- Start with a gripping hook\n- Conversational tone, no stage directions or brackets\n- End with a memorable conclusion and CTA\n\nReturn ONLY the narration text, nothing else.`}]})});
       if(!res.ok){ const e=await res.json().catch(()=>{}); throw new Error(e?.error?.message||`HTTP ${res.status}`); }
-      const d=await res.json(); setScript(d.content[0].text.trim());
+      const d=await res.json();
+      const generatedText = d.content[0].text.trim();
+      if (scriptInputMode === "structured") {
+        // Parse generated text into structured scenes
+        const paras = generatedText.split(/\n{2,}/).map(p=>p.trim()).filter(p=>p.length>10);
+        setStructuredScenes(paras.map(p=>({narration:p, visual:""})));
+      } else {
+        setScript(generatedText);
+      }
     }catch(e){ setError("Script generation failed: "+e.message); }
     setGenLoading(false);
   };
@@ -306,7 +448,7 @@ export default function CineForge() {
   // ── ElevenLabs TTS ─────────────────────────────────────────────────────────
   const generateElevenLabsAudio = async () => {
     log("🎙 Generating AI voice with ElevenLabs...");
-    const fullText=scenes.map(s=>s.text).join(" ");
+    const fullText=parseScenes(derivedScript).map(s=>s.text).join(" ");
     log(`  Sending ${fullText.length} characters to ElevenLabs...`);
     const res=await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${voiceId}`,{method:"POST",headers:{"Accept":"audio/mpeg","xi-api-key":elevenlabsKey.trim(),"Content-Type":"application/json"},body:JSON.stringify({text:fullText,model_id:"eleven_flash_v2_5",voice_settings:{stability:0.5,similarity_boost:0.75,style:0.3,use_speaker_boost:true}})});
     if(!res.ok){ const t=await res.text(); let msg=t.slice(0,200); try{const j=JSON.parse(t);msg=j?.detail?.message||j?.detail||msg;}catch(e){} throw new Error(`ElevenLabs: ${msg}`); }
@@ -318,7 +460,7 @@ export default function CineForge() {
   // ── Main build ─────────────────────────────────────────────────────────────
   const buildVideo = async () => {
     setBuilding(true); setOutputURL(null); setError(""); setBuildLog([]); setBuildPct(0);
-    const sceneList=parseScenes(script);
+    const sceneList=parseScenes(derivedScript);
     if(sceneList.length===0){ setError("No scenes — separate paragraphs with blank lines."); setBuilding(false); return; }
     const total=sceneList.length;
     const subStyleObj=SUBTITLE_STYLES.find(s=>s.id===subStyle);
@@ -346,10 +488,9 @@ export default function CineForge() {
     const totalDur=decodedAudio.duration;
     log("⏱ Distributing audio across scenes...");
     setBuildPct(28);
-    const wc=sceneList.map(sc=>sc.text.split(/\s+/).length);
-    const tw=wc.reduce((a,b)=>a+b,0);
-    const sceneDurs=wc.map(w=>(w/tw)*totalDur);
-    sceneDurs.forEach((d,i)=>log(`  Scene ${i+1}: ${d.toFixed(1)}s`));
+    const ranges = computeSceneRanges(totalDur, sceneList.map(s=>s.text), splitPoints.length===sceneList.length?splitPoints:null);
+    const sceneDurs = ranges.map(r=>r.dur);
+    sceneDurs.forEach((d,i)=>log(`  Scene ${i+1}: ${ranges[i].start.toFixed(1)}s → ${ranges[i].end.toFixed(1)}s (${d.toFixed(1)}s)`));
 
     // Setup recorder
     log("🎞 Setting up recorder...");
@@ -507,34 +648,241 @@ export default function CineForge() {
                 </div>
               </div>
             )}
+            {/* Script input mode toggle */}
             <div style={{marginBottom:16}}>
-              <Label>{script?"Script — edit as needed":"Paste Your Script"}</Label>
-              <InfoBox icon="💡" color="#a259ff">Separate each scene with a <strong style={{color:"#a259ff"}}>blank line</strong>. Each paragraph = one scene with its own canvas-generated background.</InfoBox>
-              <textarea value={script} onChange={e=>setScript(e.target.value)} placeholder={"Scene 1 — introduce your topic here. 4–8 sentences per scene.\n\nScene 2 — continue your story. Each paragraph gets its own matching canvas background.\n\nScene 3 — keep going for as many scenes as needed."} style={iStyle({resize:"vertical",lineHeight:1.75,fontFamily:"'JetBrains Mono',monospace",fontSize:13})} rows={14}/>
-              {script.trim()&&(
-                <div style={{display:"flex",gap:8,marginTop:8,flexWrap:"wrap"}}>
-                  {[{label:`${script.trim().split(/\s+/).length} words`,color:"#4f8ef7"},{label:`${scenes.length} scenes`,color:"#a259ff"},{label:`~${Math.round(script.trim().split(/\s+/).length/140)} min`,color:"#00C896"}].map(({label,color})=>(
-                    <span key={label} style={{background:color+"18",color,border:`1px solid ${color}30`,borderRadius:20,padding:"3px 11px",fontSize:11,fontWeight:600}}>{label}</span>
+              <Label>Script Input Mode</Label>
+              <div style={{display:"flex",gap:8,marginBottom:16}}>
+                <button onClick={()=>setScriptInputMode("structured")} style={modeBtn(scriptInputMode==="structured","#a259ff")}>📋 Scene-by-Scene Editor</button>
+                <button onClick={()=>setScriptInputMode("plain")} style={modeBtn(scriptInputMode==="plain","#4f8ef7")}>📝 Plain Text</button>
+              </div>
+            </div>
+
+            {/* Structured scene editor */}
+            {scriptInputMode==="structured"&&(
+              <div style={{marginBottom:16}}>
+                <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:10}}>
+                  <Label>Scene Editor</Label>
+                  <button onClick={()=>setStructuredScenes(s=>[...s,{narration:"",visual:""}])} style={{background:"#1a2040",border:"1px solid #4f8ef750",borderRadius:8,padding:"5px 12px",color:"#90a8f0",fontSize:12,cursor:"pointer",fontFamily:"inherit",fontWeight:600}}>+ Add Scene</button>
+                </div>
+                <InfoBox icon="🎬" color="#a259ff">Write your narration and describe the visual separately for each scene. The visual description is used to search for the best matching image — it never appears in the video.</InfoBox>
+                <div style={{display:"grid",gap:12}}>
+                  {structuredScenes.map((sc,i)=>(
+                    <div key={i} style={{background:"#0a0a12",border:"1px solid #1a1a2a",borderRadius:12,overflow:"hidden"}}>
+                      {/* Scene header */}
+                      <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"10px 14px",borderBottom:"1px solid #141420",background:"#0d0d16"}}>
+                        <div style={{display:"flex",alignItems:"center",gap:8}}>
+                          <span style={{background:"#a259ff22",color:"#a259ff",border:"1px solid #a259ff40",borderRadius:6,padding:"2px 8px",fontSize:11,fontWeight:700}}>Scene {i+1}</span>
+                          {sc.narration.trim()&&<span style={{color:"#334",fontSize:10}}>{sc.narration.trim().split(/\s+/).length} words</span>}
+                        </div>
+                        {structuredScenes.length>1&&(
+                          <button onClick={()=>setStructuredScenes(s=>s.filter((_,j)=>j!==i))} style={{background:"none",border:"none",color:"#334",cursor:"pointer",fontSize:13,padding:"2px 6px"}}>✕</button>
+                        )}
+                      </div>
+                      {/* Two-column layout */}
+                      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:0}}>
+                        {/* Narration */}
+                        <div style={{padding:"12px 14px",borderRight:"1px solid #141420"}}>
+                          <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:6}}>
+                            <span style={{fontSize:12}}>🎙</span>
+                            <span style={{color:"#778",fontSize:11,fontWeight:600,textTransform:"uppercase",letterSpacing:0.8}}>Narration</span>
+                          </div>
+                          <textarea
+                            value={sc.narration}
+                            onChange={e=>setStructuredScenes(s=>s.map((x,j)=>j===i?{...x,narration:e.target.value}:x))}
+                            placeholder="Write what will be spoken and shown as subtitles..."
+                            style={{width:"100%",background:"transparent",border:"none",color:"#d0d0e0",fontSize:13,lineHeight:1.7,fontFamily:"inherit",resize:"none",outline:"none",minHeight:100}}
+                            rows={5}
+                          />
+                        </div>
+                        {/* Visual */}
+                        <div style={{padding:"12px 14px",background:"#08080f"}}>
+                          <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:6}}>
+                            <span style={{fontSize:12}}>🖼</span>
+                            <span style={{color:"#778",fontSize:11,fontWeight:600,textTransform:"uppercase",letterSpacing:0.8}}>Visual Direction</span>
+                          </div>
+                          <textarea
+                            value={sc.visual}
+                            onChange={e=>setStructuredScenes(s=>s.map((x,j)=>j===i?{...x,visual:e.target.value}:x))}
+                            placeholder="Describe the image you want...&#10;e.g. close-up neuron synapse firing blue glow, aerial view ocean waves at sunset, busy city street time-lapse night"
+                            style={{width:"100%",background:"transparent",border:"none",color:"#a0b0c0",fontSize:12,lineHeight:1.7,fontFamily:"inherit",resize:"none",outline:"none",minHeight:100}}
+                            rows={5}
+                          />
+                          {sc.visual.trim()&&(
+                            <div style={{marginTop:4,fontSize:10,color:"#334"}}>
+                              🔍 Will search: <span style={{color:"#4f8ef7",fontFamily:"monospace"}}>"{sc.visual.trim().slice(0,40)}{sc.visual.trim().length>40?"...":""}"</span>
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    </div>
                   ))}
                 </div>
-              )}
-            </div>
+                {/* Stats */}
+                {structuredScenes.some(s=>s.narration.trim())&&(
+                  <div style={{display:"flex",gap:8,marginTop:10,flexWrap:"wrap"}}>
+                    {[
+                      {label:`${derivedScript.split(/\s+/).filter(Boolean).length} words`,color:"#4f8ef7"},
+                      {label:`${scenes.length} scenes`,color:"#a259ff"},
+                      {label:`~${Math.round(derivedScript.split(/\s+/).filter(Boolean).length/140)} min`,color:"#00C896"},
+                      {label:`${structuredScenes.filter(s=>s.visual.trim()).length} visuals set`,color:"#FB923C"},
+                    ].map(({label,color})=>(
+                      <span key={label} style={{background:color+"18",color,border:`1px solid ${color}30`,borderRadius:20,padding:"3px 11px",fontSize:11,fontWeight:600}}>{label}</span>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Plain text editor */}
+            {scriptInputMode==="plain"&&(
+              <div style={{marginBottom:16}}>
+                <Label>Paste Your Script</Label>
+                <InfoBox icon="💡" color="#a259ff">Separate each scene with a <strong style={{color:"#a259ff"}}>blank line</strong>. Each paragraph = one scene. Images are auto-matched from your text keywords.</InfoBox>
+                <textarea value={script} onChange={e=>setScript(e.target.value)}
+                  placeholder={"Scene 1 — introduce your topic here. 4–8 sentences per scene.\n\nScene 2 — continue your story here.\n\nScene 3 — keep going for as many scenes as needed."}
+                  style={iStyle({resize:"vertical",lineHeight:1.75,fontFamily:"'JetBrains Mono',monospace",fontSize:13})} rows={14}/>
+                {script.trim()&&(
+                  <div style={{display:"flex",gap:8,marginTop:8,flexWrap:"wrap"}}>
+                    {[{label:`${script.trim().split(/\s+/).length} words`,color:"#4f8ef7"},{label:`${scenes.length} scenes`,color:"#a259ff"},{label:`~${Math.round(script.trim().split(/\s+/).length/140)} min`,color:"#00C896"}].map(({label,color})=>(
+                      <span key={label} style={{background:color+"18",color,border:`1px solid ${color}30`,borderRadius:20,padding:"3px 11px",fontSize:11,fontWeight:600}}>{label}</span>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
             {voiceMode==="upload"?(
               <div style={{marginBottom:16}}>
                 <Label>Upload Your Voiceover Audio</Label>
-                <div onDrop={handleAudioDrop} onDragOver={e=>e.preventDefault()} onClick={()=>document.getElementById("audioInput").click()}
-                  style={{border:`2px dashed ${audioFile?"#00C896":"#1e1e2a"}`,borderRadius:12,padding:audioFile?"16px 20px":"32px 20px",textAlign:"center",cursor:"pointer",background:"#0d0d10",transition:"border-color .2s"}}>
+                {/* Drop zone */}
+                <div onDrop={handleAudioDrop} onDragOver={e=>e.preventDefault()} onClick={()=>!audioFile&&document.getElementById("audioInput").click()}
+                  style={{border:`2px dashed ${audioFile?"#00C896":"#1e1e2a"}`,borderRadius:12,padding:audioFile?"16px 20px":"32px 20px",textAlign:"center",cursor:audioFile?"default":"pointer",background:"#0d0d10",transition:"border-color .2s",marginBottom:audioFile?12:0}}>
                   {audioFile?(
                     <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",flexWrap:"wrap",gap:10}}>
-                      <div style={{display:"flex",alignItems:"center",gap:12}}><span style={{fontSize:24}}>🎙</span><div style={{textAlign:"left"}}><div style={{color:"#00C896",fontWeight:700,fontSize:14}}>{audioFile.name}</div><div style={{color:"#445",fontSize:12}}>{(audioFile.size/1024/1024).toFixed(1)} MB{audioDur?` · ${Math.floor(audioDur/60)}:${String(Math.floor(audioDur%60)).padStart(2,"0")}`:""}</div></div></div>
-                      <audio src={audioURL} controls style={{height:32,maxWidth:180}}/>
-                      <button onClick={e=>{e.stopPropagation();setAudioFile(null);setAudioURL(null);setAudioDur(null);}} style={{background:"none",border:"1px solid #2a2a3a",borderRadius:6,color:"#556",padding:"4px 10px",cursor:"pointer",fontSize:12}}>✕</button>
+                      <div style={{display:"flex",alignItems:"center",gap:12}}>
+                        <span style={{fontSize:24}}>🎙</span>
+                        <div style={{textAlign:"left"}}>
+                          <div style={{color:"#00C896",fontWeight:700,fontSize:14}}>{audioFile.name}</div>
+                          <div style={{color:"#445",fontSize:12}}>{(audioFile.size/1024/1024).toFixed(1)} MB{audioDur?` · ${Math.floor(audioDur/60)}:${String(Math.floor(audioDur%60)).padStart(2,"0")}`:""}</div>
+                        </div>
+                      </div>
+                      <div style={{display:"flex",gap:8,alignItems:"center"}}>
+                        <audio src={audioURL} controls style={{height:32,maxWidth:200}}/>
+                        <button onClick={e=>{e.stopPropagation();setAudioFile(null);setAudioURL(null);setAudioDur(null);setSplitPoints([]);}} style={{background:"none",border:"1px solid #2a2a3a",borderRadius:6,color:"#556",padding:"4px 10px",cursor:"pointer",fontSize:12}}>✕</button>
+                      </div>
                     </div>
                   ):(
                     <><div style={{fontSize:32,marginBottom:10}}>🎙</div><div style={{color:"#778",fontSize:14,marginBottom:4}}>Drop your audio here</div><div style={{color:"#334",fontSize:12}}>MP3 · WAV · M4A · AAC</div></>
                   )}
                   <input id="audioInput" type="file" accept="audio/*" onChange={handleAudioDrop} style={{display:"none"}}/>
                 </div>
+
+                {/* Scene audio timeline — shown when audio is loaded and scenes exist */}
+                {audioFile&&audioDur&&scenes.length>0&&(()=>{
+                  const ranges = computeSceneRanges(audioDur, scenes.map(s=>s.text), splitPoints.length===scenes.length?splitPoints:null);
+                  return (
+                    <div style={{background:"#0a0a12",border:"1px solid #1a1a2a",borderRadius:12,overflow:"hidden"}}>
+                      {/* Header */}
+                      <div style={{padding:"10px 14px",borderBottom:"1px solid #141420",display:"flex",alignItems:"center",justifyContent:"space-between"}}>
+                        <div style={{display:"flex",alignItems:"center",gap:8}}>
+                          <span style={{color:"#00C896",fontSize:12}}>🎵</span>
+                          <span style={{color:"#778",fontSize:11,fontWeight:700,textTransform:"uppercase",letterSpacing:0.8}}>Scene Audio Preview</span>
+                        </div>
+                        <div style={{display:"flex",gap:8,alignItems:"center"}}>
+                          {splitPoints.length===scenes.length&&(
+                            <button onClick={()=>setSplitPoints([])} style={{background:"none",border:"1px solid #2a2a3a",borderRadius:6,color:"#556",fontSize:10,padding:"3px 8px",cursor:"pointer",fontFamily:"inherit"}}>↺ Auto-split</button>
+                          )}
+                          <span style={{color:"#334",fontSize:11}}>Total: {fmtTime(audioDur)}</span>
+                        </div>
+                      </div>
+
+                      {/* Timeline bar */}
+                      <div style={{padding:"10px 14px 4px"}}>
+                        <div style={{position:"relative",height:24,borderRadius:6,overflow:"hidden",background:"#111118",marginBottom:8}}>
+                          {ranges.map((r,i)=>{
+                            const colors=["#4f8ef7","#a259ff","#00C896","#FB923C","#F472B6","#2DD4BF","#FBBF24","#E879F9"];
+                            const color=colors[i%colors.length];
+                            const leftPct=(r.start/audioDur)*100;
+                            const widthPct=(r.dur/audioDur)*100;
+                            return (
+                              <div key={i} style={{position:"absolute",top:0,left:`${leftPct}%`,width:`${widthPct}%`,height:"100%",background:color+"40",borderRight:"1px solid "+color+"60",display:"flex",alignItems:"center",justifyContent:"center",overflow:"hidden"}}>
+                                <span style={{color:color,fontSize:9,fontWeight:700}}>SC{i+1}</span>
+                              </div>
+                            );
+                          })}
+                        </div>
+                        <div style={{display:"flex",justifyContent:"space-between",color:"#334",fontSize:9,marginBottom:8}}>
+                          <span>0:00</span><span>{fmtTime(audioDur/2)}</span><span>{fmtTime(audioDur)}</span>
+                        </div>
+                      </div>
+
+                      {/* Scene rows */}
+                      <div style={{padding:"0 14px 12px",display:"grid",gap:6}}>
+                        {ranges.map((r,i)=>{
+                          const colors=["#4f8ef7","#a259ff","#00C896","#FB923C","#F472B6","#2DD4BF","#FBBF24","#E879F9"];
+                          const color=colors[i%colors.length];
+                          const isPlaying=playingScene===i;
+                          const sceneText = scenes[i]?.text||"";
+                          const preview = sceneText.split(/\s+/).slice(0,8).join(" ")+(sceneText.split(/\s+/).length>8?"...":"");
+
+                          const playSegment = () => {
+                            if(isPlaying){ audioPreviewRef.current?.pause(); setPlayingScene(null); return; }
+                            const a = audioPreviewRef.current;
+                            if(!a) return;
+                            a.src = audioURL;
+                            a.currentTime = r.start;
+                            a.play();
+                            setPlayingScene(i);
+                            // Stop at end of segment
+                            const checkStop = () => {
+                              if(a.currentTime>=r.end){ a.pause(); setPlayingScene(null); a.removeEventListener("timeupdate",checkStop); }
+                            };
+                            a.addEventListener("timeupdate",checkStop);
+                          };
+
+                          return (
+                            <div key={i} style={{display:"flex",alignItems:"center",gap:8,padding:"8px 10px",background:isPlaying?color+"12":"#0d0d14",border:`1px solid ${isPlaying?color+"40":"#141420"}`,borderRadius:8,transition:"all .2s"}}>
+                              {/* Scene badge */}
+                              <div style={{background:color+"20",color,border:`1px solid ${color+"40"}`,borderRadius:5,padding:"2px 7px",fontSize:10,fontWeight:700,flexShrink:0}}>SC{i+1}</div>
+                              {/* Play button */}
+                              <button onClick={playSegment} style={{width:28,height:28,borderRadius:"50%",background:isPlaying?color+"30":"#111118",border:`1px solid ${isPlaying?color:"#1e1e2a"}`,color:isPlaying?color:"#556",fontSize:12,cursor:"pointer",flexShrink:0,display:"flex",alignItems:"center",justifyContent:"center",fontFamily:"inherit"}}>
+                                {isPlaying?"⏸":"▶"}
+                              </button>
+                              {/* Time range */}
+                              <div style={{color:color,fontSize:10,fontFamily:"monospace",flexShrink:0,minWidth:90}}>
+                                {fmtTime(r.start)} → {fmtTime(r.end)}
+                              </div>
+                              {/* Narration preview */}
+                              <div style={{color:"#445",fontSize:11,flex:1,overflow:"hidden",whiteSpace:"nowrap",textOverflow:"ellipsis"}}>"{preview}"</div>
+                              {/* Manual start time adjuster */}
+                              {i>0&&(
+                                <div style={{display:"flex",alignItems:"center",gap:4,flexShrink:0}}>
+                                  <span style={{color:"#334",fontSize:10}}>Start:</span>
+                                  <input
+                                    type="number"
+                                    step="0.1" min="0" max={audioDur}
+                                    value={splitPoints.length===scenes.length?splitPoints[i].toFixed(1):r.start.toFixed(1)}
+                                    onChange={e=>{
+                                      const val=parseFloat(e.target.value)||0;
+                                      setSplitPoints(prev=>{
+                                        const base = ranges.map(r=>r.start);
+                                        const pts = prev.length===scenes.length?[...prev]:[...base];
+                                        pts[i]=Math.max(pts[i-1]+0.5,Math.min(val,i<scenes.length-1?pts[i+1]-0.5:audioDur-0.5));
+                                        return pts;
+                                      });
+                                    }}
+                                    style={{width:52,background:"#0d0d10",border:"1px solid #1e1e2a",borderRadius:5,padding:"2px 5px",color:"#90a8f0",fontSize:10,fontFamily:"monospace",textAlign:"center"}}
+                                  />
+                                  <span style={{color:"#334",fontSize:10}}>s</span>
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
+                      <audio ref={audioPreviewRef} style={{display:"none"}} onEnded={()=>setPlayingScene(null)}/>
+                    </div>
+                  );
+                })()}
               </div>
             ):(
               <div style={{marginBottom:16}}>
@@ -554,7 +902,7 @@ export default function CineForge() {
             {error&&<ErrBox>{error}</ErrBox>}
             <div style={{display:"flex",gap:10,marginTop:20}}>
               <NavBtn variant="back" onClick={()=>setStep(0)}>← Back</NavBtn>
-              <NavBtn disabled={!script.trim()||(voiceMode==="upload"&&!audioFile)} onClick={()=>setStep(2)}>Continue to Style →</NavBtn>
+              <NavBtn disabled={!derivedScript.trim()||(voiceMode==="upload"&&!audioFile)} onClick={()=>setStep(2)}>Continue to Style →</NavBtn>
             </div>
           </div>
         )}
@@ -611,7 +959,7 @@ export default function CineForge() {
                 </div>
                 <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(160px,1fr))",gap:10}}>
                   {scenes.map((sc,i)=>(
-                    <ScenePreviewCard key={i} scene={sc} idx={i} result={sceneImages[i]}/>
+                    <ScenePreviewCard key={i} scene={sc} idx={i} result={sceneImages[i]} onSwap={(idx,newResult)=>{ setSceneImages(prev=>{ const n=[...prev]; n[idx]=newResult; return n; }); }}/>
                   ))}
                 </div>
                 
@@ -688,7 +1036,7 @@ export default function CineForge() {
                 </div>
               ))}
             </div>
-            <button onClick={()=>{setStep(0);setScript("");setAudioFile(null);setAudioURL(null);setAudioDur(null);setTitle("");setOutputURL(null);setBuildLog([]);setBuildPct(0);setError("");setSceneImages([]);setImagesFetched(false);}} style={{background:"#0d0d12",border:"1px solid #14142a",color:"#445",borderRadius:10,padding:"10px 20px",cursor:"pointer",fontSize:13}}>← Make Another Video</button>
+            <button onClick={()=>{setStep(0);setScript("");setStructuredScenes([{narration:"",visual:""}]);setScriptInputMode("structured");setSplitPoints([]);setPlayingScene(null);setAudioFile(null);setAudioURL(null);setAudioDur(null);setTitle("");setOutputURL(null);setBuildLog([]);setBuildPct(0);setError("");setSceneImages([]);setImagesFetched(false);}} style={{background:"#0d0d12",border:"1px solid #14142a",color:"#445",borderRadius:10,padding:"10px 20px",cursor:"pointer",fontSize:13}}>← Make Another Video</button>
           </div>
         )}
 
