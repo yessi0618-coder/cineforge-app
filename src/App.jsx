@@ -460,7 +460,15 @@ export default function CineForge() {
   // Build
   const buildVideo = async () => {
     setBuilding(true); setOutputURL(null); setError(""); setBuildLog([]); setBuildPct(0);
-    const sl=validScenes; const total=sl.length;
+    // Deep snapshot — freeze scene data at build time, independent of React state
+    const sl = scenes
+      .filter(s=>s.narration.trim())
+      .map(s=>({
+        narration: s.narration,
+        visual:    s.visual,
+        media:     s.media ? { ...s.media } : null,
+      }));
+    const total=sl.length;
     if(!total){ setError("Add at least one scene with narration."); setBuilding(false); return; }
     const subSt=SUBTITLE_STYLES.find(s=>s.id===subStyle);
     const bars=overlay==="bars";
@@ -511,71 +519,85 @@ export default function CineForge() {
     rec.start(250); src.start(0);
     log(`▶ Recording (${mime})`);
 
-    // Render scenes sequentially — each scene renders for its exact duration
-    // using audioContext time for precise sync (no RAF closure bugs)
+    // Render each scene sequentially
     log("🎨 Rendering scenes...");
+    log(`  Total scenes: ${sl.length}`);
 
     for(let si=0;si<sl.length;si++){
-      const sc=sl[si]; const dur=ranges[si].dur; const m=sc.media;
-      const mediaLabel=m?.kind==="video"?"custom video":m?.img?"photo":"gradient";
-      log(`  🎬 Scene ${si+1}/${sl.length}: ${mediaLabel} · ${dur.toFixed(1)}s`);
+      // Explicitly extract scene data for this iteration
+      const sceneNarration = sl[si].narration;
+      const sceneMedia     = sl[si].media;
+      const sceneDur       = ranges[si].dur;
+      const sceneLabel     = sceneMedia?.kind==="video"?"custom video":sceneMedia?.img?"photo":"gradient";
+
+      log(`  🎬 Scene ${si+1}/${sl.length}: ${sceneLabel} · ${sceneDur.toFixed(1)}s`);
 
       // Start video if needed
-      if(m?.videoEl){ try{m.videoEl.currentTime=0; await m.videoEl.play();}catch(e){} }
+      if(sceneMedia?.videoEl){
+        try{ sceneMedia.videoEl.currentTime=0; await sceneMedia.videoEl.play(); }catch(e){}
+      }
 
-      // Render this scene frame by frame using real wall-clock time
       const sceneStart = performance.now();
-      const sceneEnd   = sceneStart + dur * 1000;
+      const sceneEndMs = sceneStart + sceneDur * 1000;
 
-      await new Promise(resolve => {
-        const drawFrame = () => {
-          const now = performance.now();
-          const elapsed = Math.min((now - sceneStart) / 1000, dur);
-          const prog = elapsed / dur;
+      await new Promise(resolveFn => {
+        // Capture all scene-specific data in closure vars (not array refs)
+        const narration  = sceneNarration;
+        const media      = sceneMedia;
+        const dur        = sceneDur;
+        const sceneNum   = si;
+        const startMs    = sceneStart;
+        const endMs      = sceneEndMs;
 
-          // Background
+        function frame() {
+          const now     = performance.now();
+          const elapsed = Math.min((now - startMs) / 1000, dur);
+          const prog    = elapsed / dur;
+
           ctx.clearRect(0,0,1280,720);
-          if(m?.videoEl && m.videoEl.readyState>=2){
-            const v=m.videoEl,vw=v.videoWidth||1280,vh=v.videoHeight||720;
-            const sc2=Math.max(1280/vw,720/vh);
-            ctx.drawImage(v,(1280-vw*sc2)/2,(720-vh*sc2)/2,vw*sc2,vh*sc2);
-          } else if(m?.img){
-            try{ drawImgCover(ctx,m.img,(prog-.5)*50); }
-            catch(e){ drawGradient(ctx,si); }
+
+          // Draw background for THIS scene
+          if(media?.videoEl && media.videoEl.readyState>=2){
+            const v=media.videoEl;
+            const vw=v.videoWidth||1280, vh=v.videoHeight||720;
+            const sc2=Math.max(1280/vw, 720/vh);
+            ctx.drawImage(v, (1280-vw*sc2)/2, (720-vh*sc2)/2, vw*sc2, vh*sc2);
+          } else if(media?.img){
+            try{ drawImgCover(ctx, media.img, (prog-.5)*50); }
+            catch(e){ drawGradient(ctx, sceneNum); }
           } else {
-            drawGradient(ctx,si);
+            drawGradient(ctx, sceneNum);
           }
 
-          // Overlay
-          drawOverlay(ctx,overlay,Math.floor(elapsed*30));
+          drawOverlay(ctx, overlay, Math.floor(elapsed*30));
 
-          // Title intro card (first scene only, first 3s)
-          if(showTitle && si===0 && elapsed<3){
-            const a=elapsed<.6?elapsed/.6:elapsed>2.4?1-(elapsed-2.4)/.6:1;
+          // Title card — first scene only
+          if(showTitle && sceneNum===0 && elapsed<3){
+            const a = elapsed<.6 ? elapsed/.6 : elapsed>2.4 ? 1-(elapsed-2.4)/.6 : 1;
             ctx.save(); ctx.globalAlpha=a;
             ctx.fillStyle="rgba(0,0,0,.65)";
             roundRect(ctx,80,270,1120,180,12); ctx.fill();
             ctx.font="bold 48px Georgia"; ctx.fillStyle="#fff"; ctx.textAlign="center";
-            ctx.fillText(videoTitle||"Your Video",640,360,1060); ctx.restore();
+            ctx.fillText(videoTitle||"Your Video",640,360,1060);
+            ctx.restore();
           }
 
           // Subtitles
-          const sub=buildChunks(sc.narration,dur).find(ch=>elapsed>=ch.start&&elapsed<ch.end);
-          if(sub) drawSub(ctx,sub.text,subSt,bars);
+          const chunks = buildChunks(narration, dur);
+          const sub = chunks.find(ch => elapsed>=ch.start && elapsed<ch.end);
+          if(sub) drawSub(ctx, sub.text, subSt, bars);
 
-          // Overall progress
-          setBuildPct(22+Math.round(((si + prog)/sl.length)*68));
+          setBuildPct(22 + Math.round(((sceneNum + prog)/sl.length)*68));
 
-          // Continue or finish scene
-          if(now < sceneEnd){
-            requestAnimationFrame(drawFrame);
+          if(now < endMs){
+            requestAnimationFrame(frame);
           } else {
-            if(m?.videoEl) try{m.videoEl.pause();}catch(e){}
-            log(`  ✓ Scene ${si+1} done`);
-            resolve();
+            if(media?.videoEl) try{media.videoEl.pause();}catch(e){}
+            log(`  ✓ Scene ${sceneNum+1} complete`);
+            resolveFn();
           }
-        };
-        requestAnimationFrame(drawFrame);
+        }
+        requestAnimationFrame(frame);
       });
     }
 
