@@ -511,81 +511,73 @@ export default function CineForge() {
     rec.start(250); src.start(0);
     log(`▶ Recording (${mime})`);
 
-    // Render using real-time RAF loop — synced to actual audio playback
-    // This is MUCH faster than frame-by-frame sleep and never stalls
-    log("🎨 Rendering scenes in real time...");
+    // Render scenes sequentially — each scene renders for its exact duration
+    // using audioContext time for precise sync (no RAF closure bugs)
+    log("🎨 Rendering scenes...");
 
-    await new Promise(resolve => {
-      let sceneIdx = 0;
-      let sceneStartTime = null;
+    for(let si=0;si<sl.length;si++){
+      const sc=sl[si]; const dur=ranges[si].dur; const m=sc.media;
+      const mediaLabel=m?.kind==="video"?"custom video":m?.img?"photo":"gradient";
+      log(`  🎬 Scene ${si+1}/${sl.length}: ${mediaLabel} · ${dur.toFixed(1)}s`);
 
-      // Start playing uploaded videos for first scene
-      const startScene = (si) => {
-        const m = sl[si]?.media;
-        if(m?.videoEl){ try{m.videoEl.currentTime=0;m.videoEl.play();}catch(e){} }
-        sceneStartTime = null; // will be set on first frame of this scene
-      };
-      startScene(0);
+      // Start video if needed
+      if(m?.videoEl){ try{m.videoEl.currentTime=0; await m.videoEl.play();}catch(e){} }
 
-      const render = (timestamp) => {
-        if(sceneIdx >= sl.length){ resolve(); return; }
+      // Render this scene frame by frame using real wall-clock time
+      const sceneStart = performance.now();
+      const sceneEnd   = sceneStart + dur * 1000;
 
-        if(sceneStartTime===null) sceneStartTime = timestamp;
-        const elapsed = (timestamp - sceneStartTime) / 1000; // seconds into current scene
-        const si = sceneIdx;
-        const sc = sl[si];
-        const dur = ranges[si].dur;
-        const m = sc.media;
-        const prog = Math.min(elapsed / dur, 1);
+      await new Promise(resolve => {
+        const drawFrame = () => {
+          const now = performance.now();
+          const elapsed = Math.min((now - sceneStart) / 1000, dur);
+          const prog = elapsed / dur;
 
-        // Draw background
-        ctx.clearRect(0,0,1280,720);
-        if(m?.videoEl&&m.videoEl.readyState>=2){
-          const v=m.videoEl,vw=v.videoWidth,vh=v.videoHeight,sc2=Math.max(1280/vw,720/vh);
-          ctx.drawImage(v,(1280-vw*sc2)/2,(720-vh*sc2)/2,vw*sc2,vh*sc2);
-        } else if(m?.img){
-          // For local images (no crossOrigin), catch any taint errors
-          try {
-            drawImgCover(ctx,m.img,(prog-.5)*50);
-          } catch(e) {
-            drawGradient(ctx,si); // fallback if tainted
+          // Background
+          ctx.clearRect(0,0,1280,720);
+          if(m?.videoEl && m.videoEl.readyState>=2){
+            const v=m.videoEl,vw=v.videoWidth||1280,vh=v.videoHeight||720;
+            const sc2=Math.max(1280/vw,720/vh);
+            ctx.drawImage(v,(1280-vw*sc2)/2,(720-vh*sc2)/2,vw*sc2,vh*sc2);
+          } else if(m?.img){
+            try{ drawImgCover(ctx,m.img,(prog-.5)*50); }
+            catch(e){ drawGradient(ctx,si); }
+          } else {
+            drawGradient(ctx,si);
           }
-        } else {
-          drawGradient(ctx,si);
-        }
 
-        drawOverlay(ctx,overlay,0);
+          // Overlay
+          drawOverlay(ctx,overlay,Math.floor(elapsed*30));
 
-        // Title card on first scene
-        if(showTitle&&si===0&&elapsed<3){
-          const a=elapsed<.6?elapsed/.6:elapsed>2.4?1-(elapsed-2.4)/.6:1;
-          ctx.save(); ctx.globalAlpha=a;
-          ctx.fillStyle="rgba(0,0,0,.65)"; roundRect(ctx,80,270,1120,180,12); ctx.fill();
-          ctx.font="bold 48px Georgia"; ctx.fillStyle="#fff"; ctx.textAlign="center";
-          ctx.fillText(videoTitle||"Your Video",640,360,1060); ctx.restore();
-        }
+          // Title intro card (first scene only, first 3s)
+          if(showTitle && si===0 && elapsed<3){
+            const a=elapsed<.6?elapsed/.6:elapsed>2.4?1-(elapsed-2.4)/.6:1;
+            ctx.save(); ctx.globalAlpha=a;
+            ctx.fillStyle="rgba(0,0,0,.65)";
+            roundRect(ctx,80,270,1120,180,12); ctx.fill();
+            ctx.font="bold 48px Georgia"; ctx.fillStyle="#fff"; ctx.textAlign="center";
+            ctx.fillText(videoTitle||"Your Video",640,360,1060); ctx.restore();
+          }
 
-        // Subtitles
-        const sub=buildChunks(sc.narration,dur).find(ch=>elapsed>=ch.start&&elapsed<ch.end);
-        if(sub) drawSub(ctx,sub.text,subSt,bars);
+          // Subtitles
+          const sub=buildChunks(sc.narration,dur).find(ch=>elapsed>=ch.start&&elapsed<ch.end);
+          if(sub) drawSub(ctx,sub.text,subSt,bars);
 
-        // Progress update
-        const overallProg = (si + prog) / sl.length;
-        setBuildPct(22 + Math.round(overallProg * 68));
+          // Overall progress
+          setBuildPct(22+Math.round(((si + prog)/sl.length)*68));
 
-        // Advance scene when done
-        if(elapsed >= dur){
-          log(`  ✓ Scene ${si+1}/${sl.length} complete`);
-          if(m?.videoEl) try{m.videoEl.pause();}catch(e){}
-          sceneIdx++;
-          if(sceneIdx < sl.length){ startScene(sceneIdx); }
-          else{ resolve(); return; }
-        }
-
-        requestAnimationFrame(render);
-      };
-      requestAnimationFrame(render);
-    });
+          // Continue or finish scene
+          if(now < sceneEnd){
+            requestAnimationFrame(drawFrame);
+          } else {
+            if(m?.videoEl) try{m.videoEl.pause();}catch(e){}
+            log(`  ✓ Scene ${si+1} done`);
+            resolve();
+          }
+        };
+        requestAnimationFrame(drawFrame);
+      });
+    }
 
     // Outro card — 2 seconds
     ctx.fillStyle="#050508"; ctx.fillRect(0,0,1280,720);
