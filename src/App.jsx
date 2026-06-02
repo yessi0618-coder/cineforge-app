@@ -48,7 +48,7 @@ function buildSubChunks(text, duration) {
   return chunks.map((t,i)=>({ text:t, start:i*dur, end:(i+1)*dur }));
 }
 
-// ── Pexels Image Fetcher via Vercel Proxy (CORS-free) ────────────────────────
+// ── Pexels Image Fetcher via Vercel Proxy ────────────────────────────────────
 const PROXY_BASE = "https://cineforge-proxy.vercel.app/api/pexels";
 
 async function loadImageForCanvas(url) {
@@ -58,40 +58,42 @@ async function loadImageForCanvas(url) {
     img.onload  = () => resolve(img);
     img.onerror = () => resolve(null);
     img.src = url;
-    setTimeout(() => resolve(null), 12000);
+    setTimeout(() => resolve(null), 10000);
   });
 }
 
+// Load a local file (user-uploaded image or video) as object URL
+function loadLocalMedia(file) {
+  return URL.createObjectURL(file);
+}
+
 async function fetchSceneImage(query) {
-  // Try up to 3 search variations to find a usable image
   const queries = [
     query,
     query.split(" ").slice(0, 2).join(" "),
-    "nature landscape",
+    "nature landscape background",
   ];
-
   for (const q of queries) {
     try {
       const url = `${PROXY_BASE}?query=${encodeURIComponent(q)}&per_page=8&orientation=landscape&size=large`;
-      const r = await fetch(url);
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 8000);
+      const r = await fetch(url, { signal: controller.signal });
+      clearTimeout(timeout);
       if (!r.ok) continue;
       const data = await r.json();
       const photos = data.photos || [];
-
       for (const p of photos) {
-        // Try sizes from largest to smallest
         const src = p.src?.large2x || p.src?.large || p.src?.medium;
         if (!src) continue;
         const img = await loadImageForCanvas(src);
         if (img && img.naturalWidth > 0) {
-          return { img, url: src, photographer: p.photographer };
+          return { type:"pexels", img, url: src, photographer: p.photographer };
         }
       }
-    } catch (e) {
-      continue;
-    }
+    } catch (e) { continue; }
   }
-  return null; // use canvas fallback
+  return null;
 }
 
 // Fallback cinematic background when no image is available
@@ -211,25 +213,28 @@ function KeyField({label,link,linkLabel,value,onChange,hint,show,onToggle,placeh
 const iStyle = (ex={}) => ({width:"100%",background:"#0d0d10",border:"1px solid #1e1e2a",borderRadius:10,padding:"11px 14px",color:"#d0d0e0",fontSize:14,fontFamily:"inherit",boxSizing:"border-box",...ex});
 const modeBtn = (active,color="#4f8ef7") => ({flex:1,padding:"11px 16px",borderRadius:10,cursor:"pointer",fontWeight:700,fontSize:13,background:active?color+"22":"#0d0d10",border:`1.5px solid ${active?color:"#1e1e2a"}`,color:active?color:"#445",fontFamily:"inherit",transition:"all .2s"});
 
-// ── Scene preview card with image swap ────────────────────────────────────────
+// ── Scene preview card with image swap + upload ──────────────────────────────
 function ScenePreviewCard({ scene, idx, result, onSwap }) {
-  const [searching, setSearching] = useState(false);
-  const [searchQuery, setSearchQuery] = useState("");
-  const [showSearch, setShowSearch] = useState(false);
+  const [searching, setSearching]       = useState(false);
+  const [searchQuery, setSearchQuery]   = useState("");
+  const [showSearch, setShowSearch]     = useState(false);
+  const [showUpload, setShowUpload]     = useState(false);
   const [searchResults, setSearchResults] = useState([]);
-  const [searchError, setSearchError] = useState("");
+  const [searchError, setSearchError]   = useState("");
 
-  const hasImg   = result?.img;
-  const isWaiting = !result;
-  const statusColor = isWaiting ? "#334" : hasImg ? "#00C896" : "#f59e0b";
+  const isWaiting  = !result;
+  const isUpload   = result?.type === "upload";
+  const isFallback = result?.type === "fallback";
+  const hasMedia   = result?.img || result?.videoUrl;
+  const statusColor = isWaiting ? "#4f8ef7" : isUpload ? "#FB923C" : hasMedia ? "#00C896" : "#f59e0b";
 
   const doSearch = async () => {
     if (!searchQuery.trim()) return;
     setSearching(true); setSearchError(""); setSearchResults([]);
     try {
-      const url = `${PROXY_BASE}?query=${encodeURIComponent(searchQuery)}&per_page=6&orientation=landscape&size=large`;
+      const url = `${PROXY_BASE}?query=${encodeURIComponent(searchQuery)}&per_page=9&orientation=landscape&size=large`;
       const r = await fetch(url);
-      if (!r.ok) throw new Error("Search failed");
+      if (!r.ok) throw new Error("Search failed — check proxy");
       const data = await r.json();
       setSearchResults(data.photos || []);
       if ((data.photos||[]).length === 0) setSearchError("No results — try different keywords");
@@ -242,81 +247,117 @@ function ScenePreviewCard({ scene, idx, result, onSwap }) {
     if (!src) return;
     const img = await loadImageForCanvas(src);
     if (img) {
-      onSwap(idx, { img, url: src, photographer: photo.photographer });
+      onSwap(idx, { type:"pexels", img, url: src, photographer: photo.photographer });
       setShowSearch(false); setSearchResults([]); setSearchQuery("");
     }
   };
+
+  const handleFileUpload = (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const isVideo = file.type.startsWith("video/");
+    const isImage = file.type.startsWith("image/");
+    if (!isVideo && !isImage) return;
+    const url = URL.createObjectURL(file);
+    if (isVideo) {
+      onSwap(idx, { type:"upload", img:null, videoUrl:url, videoFile:file, photographer:`📁 ${file.name}` });
+    } else {
+      const img = new Image();
+      img.onload = () => onSwap(idx, { type:"upload", img, url, videoUrl:null, photographer:`📁 ${file.name}` });
+      img.src = url;
+    }
+    setShowUpload(false);
+  };
+
+  // Thumbnail to show
+  const thumbSrc = isUpload && result.videoUrl
+    ? null  // video — show icon
+    : result?.url || null;
 
   return (
     <div style={{background:"#0d0d12",border:`1px solid ${statusColor}30`,borderRadius:12,overflow:"hidden",transition:"border-color .3s"}}>
       {/* Thumbnail */}
       <div style={{height:100,background:"#0a0a10",position:"relative",overflow:"hidden"}}>
-        {hasImg ? (
-          <img src={result.url} alt="" crossOrigin="anonymous"
-            style={{width:"100%",height:"100%",objectFit:"cover",opacity:0.9}}
-            onError={e=>{e.target.style.display="none";}}/>
-        ) : (
-          <div style={{width:"100%",height:"100%",background:`linear-gradient(135deg,hsl(${210+idx*20},35%,10%),hsl(${230+idx*20},30%,18%))`,display:"flex",alignItems:"center",justifyContent:"center",fontSize:22,color:"#334"}}>
-            {isWaiting ? "⏳" : "🎨"}
+        {isWaiting && (
+          <div style={{width:"100%",height:"100%",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:6}}>
+            <div style={{width:20,height:20,border:"2px solid #4f8ef740",borderTop:"2px solid #4f8ef7",borderRadius:"50%",animation:"spin .8s linear infinite"}}/>
+            <span style={{color:"#334",fontSize:10}}>Fetching...</span>
           </div>
         )}
-        <div style={{position:"absolute",top:6,left:6,background:"rgba(0,0,0,0.75)",borderRadius:4,padding:"2px 6px",fontSize:10,fontWeight:700,color:"#ccc"}}>SC{String(idx+1).padStart(2,"0")}</div>
-        {/* Swap button — always visible on hover via opacity trick */}
-        {!isWaiting && (
-          <button onClick={()=>setShowSearch(s=>!s)} style={{
-            position:"absolute",top:6,right:6,
-            background:"rgba(0,0,0,0.75)",border:"1px solid #ffffff30",
-            borderRadius:6,padding:"3px 8px",fontSize:10,color:"#ccc",
-            cursor:"pointer",fontFamily:"inherit"
-          }}>🔄 Swap</button>
+        {!isWaiting && isUpload && result.videoUrl && (
+          <div style={{width:"100%",height:"100%",background:"#0a0a18",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:4}}>
+            <span style={{fontSize:28}}>🎬</span>
+            <span style={{color:"#FB923C",fontSize:10,fontWeight:600}}>Custom Video</span>
+          </div>
         )}
-        {hasImg && <div style={{position:"absolute",bottom:0,left:0,right:0,height:24,background:"linear-gradient(transparent,rgba(0,0,0,0.7))"}}/>}
+        {!isWaiting && thumbSrc && (
+          <img src={thumbSrc} alt="" crossOrigin="anonymous"
+            style={{width:"100%",height:"100%",objectFit:"cover",opacity:0.9}}
+            onError={e=>{e.target.style.display="none";}}/>
+        )}
+        {!isWaiting && isFallback && !thumbSrc && (
+          <div style={{width:"100%",height:"100%",background:`linear-gradient(135deg,hsl(${210+idx*20},35%,10%),hsl(${230+idx*20},30%,18%))`,display:"flex",alignItems:"center",justifyContent:"center",fontSize:22,color:"#334"}}>🎨</div>
+        )}
+        {/* Badge */}
+        <div style={{position:"absolute",top:6,left:6,background:"rgba(0,0,0,0.78)",borderRadius:4,padding:"2px 6px",fontSize:10,fontWeight:700,color:"#ccc"}}>SC{String(idx+1).padStart(2,"0")}</div>
+        {/* Action buttons */}
+        {!isWaiting && (
+          <div style={{position:"absolute",top:6,right:6,display:"flex",gap:4}}>
+            <button onClick={()=>{setShowUpload(s=>!s);setShowSearch(false);}} title="Upload your own image or video"
+              style={{background:"rgba(0,0,0,0.78)",border:"1px solid #FB923C60",borderRadius:5,padding:"3px 7px",fontSize:10,color:"#FB923C",cursor:"pointer",fontFamily:"inherit"}}>⬆ Upload</button>
+            <button onClick={()=>{setShowSearch(s=>!s);setShowUpload(false);}} title="Search Pexels"
+              style={{background:"rgba(0,0,0,0.78)",border:"1px solid #ffffff30",borderRadius:5,padding:"3px 7px",fontSize:10,color:"#ccc",cursor:"pointer",fontFamily:"inherit"}}>🔄 Swap</button>
+          </div>
+        )}
+        {hasMedia && !isWaiting && <div style={{position:"absolute",bottom:0,left:0,right:0,height:22,background:"linear-gradient(transparent,rgba(0,0,0,0.7))"}}/>}
       </div>
 
       {/* Info row */}
-      <div style={{padding:"7px 10px",display:"flex",alignItems:"center",justifyContent:"space-between"}}>
-        <div>
-          <div style={{color:"#556",fontSize:10,fontFamily:"monospace",marginBottom:2}}>"{scene.query}"</div>
-          <div style={{color:statusColor,fontSize:10,fontWeight:600}}>
-            {isWaiting ? "⏳ Fetching..." : hasImg ? `✓ ${result.photographer}` : "~ gradient fallback"}
-          </div>
+      <div style={{padding:"7px 10px"}}>
+        <div style={{color:"#445",fontSize:10,fontFamily:"monospace",marginBottom:2,overflow:"hidden",whiteSpace:"nowrap",textOverflow:"ellipsis"}}>"{scene.query}"</div>
+        <div style={{color:statusColor,fontSize:10,fontWeight:600,overflow:"hidden",whiteSpace:"nowrap",textOverflow:"ellipsis"}}>
+          {isWaiting ? "⏳ Fetching from Pexels..." : isUpload ? `✓ ${result.photographer}` : hasMedia ? `✓ ${result.photographer}` : "~ gradient fallback"}
         </div>
       </div>
+
+      {/* Upload panel */}
+      {showUpload && (
+        <div style={{borderTop:"1px solid #1a1a2a",padding:"10px",background:"#080810"}}>
+          <div style={{color:"#778",fontSize:11,fontWeight:600,marginBottom:8}}>Upload your own media for this scene:</div>
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:8}}>
+            <label style={{display:"flex",flexDirection:"column",alignItems:"center",gap:6,background:"#0d0d14",border:"1px dashed #FB923C40",borderRadius:8,padding:"12px 8px",cursor:"pointer",textAlign:"center"}}>
+              <span style={{fontSize:20}}>🖼</span>
+              <span style={{color:"#FB923C",fontSize:11,fontWeight:600}}>Image</span>
+              <span style={{color:"#334",fontSize:10}}>JPG, PNG, WEBP</span>
+              <input type="file" accept="image/*" onChange={handleFileUpload} style={{display:"none"}}/>
+            </label>
+            <label style={{display:"flex",flexDirection:"column",alignItems:"center",gap:6,background:"#0d0d14",border:"1px dashed #FB923C40",borderRadius:8,padding:"12px 8px",cursor:"pointer",textAlign:"center"}}>
+              <span style={{fontSize:20}}>🎬</span>
+              <span style={{color:"#FB923C",fontSize:11,fontWeight:600}}>Video</span>
+              <span style={{color:"#334",fontSize:10}}>MP4, MOV, WEBM</span>
+              <input type="file" accept="video/*" onChange={handleFileUpload} style={{display:"none"}}/>
+            </label>
+          </div>
+          <button onClick={()=>setShowUpload(false)} style={{background:"none",border:"none",color:"#445",fontSize:11,cursor:"pointer",fontFamily:"inherit"}}>✕ Cancel</button>
+        </div>
+      )}
 
       {/* Search panel */}
       {showSearch && (
         <div style={{borderTop:"1px solid #1a1a2a",padding:"10px",background:"#080810"}}>
-          <div style={{color:"#556",fontSize:11,marginBottom:7,fontWeight:600}}>Search for a different image:</div>
+          <div style={{color:"#778",fontSize:11,fontWeight:600,marginBottom:7}}>Search Pexels for a different image:</div>
           <div style={{display:"flex",gap:6,marginBottom:8}}>
-            <input
-              value={searchQuery}
-              onChange={e=>setSearchQuery(e.target.value)}
-              onKeyDown={e=>e.key==="Enter"&&doSearch()}
-              placeholder="e.g. ocean sunset, city skyline..."
-              style={{flex:1,background:"#0d0d14",border:"1px solid #1e1e2a",borderRadius:7,padding:"7px 10px",color:"#d0d0e0",fontSize:12,fontFamily:"inherit"}}
-            />
-            <button onClick={doSearch} disabled={searching||!searchQuery.trim()} style={{
-              background:"#1a2040",border:"1px solid #4f8ef750",borderRadius:7,
-              padding:"7px 12px",color:"#90a8f0",fontSize:12,cursor:"pointer",
-              fontFamily:"inherit",fontWeight:600,whiteSpace:"nowrap"
-            }}>{searching?"...":"Search"}</button>
+            <input value={searchQuery} onChange={e=>setSearchQuery(e.target.value)} onKeyDown={e=>e.key==="Enter"&&doSearch()}
+              placeholder="e.g. ocean sunset, city night..." style={{flex:1,background:"#0d0d14",border:"1px solid #1e1e2a",borderRadius:7,padding:"7px 10px",color:"#d0d0e0",fontSize:12,fontFamily:"inherit"}}/>
+            <button onClick={doSearch} disabled={searching||!searchQuery.trim()} style={{background:"#1a2040",border:"1px solid #4f8ef750",borderRadius:7,padding:"7px 12px",color:"#90a8f0",fontSize:12,cursor:"pointer",fontFamily:"inherit",fontWeight:600}}>{searching?"...":"Search"}</button>
           </div>
           {searchError && <div style={{color:"#f59e0b",fontSize:11,marginBottom:6}}>{searchError}</div>}
-          {/* Search results grid */}
           {searchResults.length > 0 && (
             <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:5}}>
               {searchResults.map(p=>(
-                <div key={p.id} onClick={()=>pickPhoto(p)} style={{
-                  height:60,borderRadius:6,overflow:"hidden",cursor:"pointer",
-                  border:"1px solid #1a1a2a",position:"relative",
-                  transition:"border-color .15s"
-                }}>
-                  <img src={p.src?.medium||p.src?.small} alt={p.photographer}
-                    style={{width:"100%",height:"100%",objectFit:"cover",opacity:0.85}}/>
-                  <div style={{position:"absolute",inset:0,background:"rgba(0,0,0,0)",transition:"background .15s",display:"flex",alignItems:"center",justifyContent:"center"}}>
-                    <span style={{color:"#fff",fontSize:16,opacity:0,transition:"opacity .15s"}}>✓</span>
-                  </div>
-                  <div style={{position:"absolute",bottom:0,left:0,right:0,background:"rgba(0,0,0,0.6)",padding:"2px 4px",fontSize:9,color:"#aaa",overflow:"hidden",whiteSpace:"nowrap",textOverflow:"ellipsis"}}>{p.photographer}</div>
+                <div key={p.id} onClick={()=>pickPhoto(p)} style={{height:60,borderRadius:6,overflow:"hidden",cursor:"pointer",border:"1px solid #1a1a2a",position:"relative"}}>
+                  <img src={p.src?.medium||p.src?.small} alt={p.photographer} style={{width:"100%",height:"100%",objectFit:"cover",opacity:0.85}}/>
+                  <div style={{position:"absolute",bottom:0,left:0,right:0,background:"rgba(0,0,0,0.65)",padding:"2px 4px",fontSize:9,color:"#aaa",overflow:"hidden",whiteSpace:"nowrap",textOverflow:"ellipsis"}}>{p.photographer}</div>
                 </div>
               ))}
             </div>
@@ -387,24 +428,32 @@ export default function CineForge() {
   // ── Pre-fetch images when entering build step ──────────────────────────────
   const prefetchImages = async (sceneList) => {
     setImagesFetching(true); setImagesFetched(false);
+    // Init with null — cards show spinner immediately
     setSceneImages(new Array(sceneList.length).fill(null));
-    const results = [];
-    for(let i=0;i<sceneList.length;i++){
-      const sc=sceneList[i];
+
+    // Fetch ALL scenes in parallel — much faster
+    const promises = sceneList.map(async (sc, i) => {
+      // If user already uploaded media for this scene, keep it
+      const existing = sceneImages[i];
+      if (existing?.type === "upload") return { idx: i, result: existing };
+      const visualQuery = sceneVisuals[i] || sc.query;
       try {
-        // Use visual direction if provided, otherwise use auto-extracted query
-        const visualQuery = sceneVisuals[i] || sc.query;
         const result = await fetchSceneImage(visualQuery);
-        results.push(result);
-        setSceneImages(prev=>{ const n=[...prev]; n[i]=result||{img:null,url:null,photographer:"gradient fallback"}; return n; });
+        return { idx: i, result: result || { type:"fallback", img:null, url:null, photographer:"gradient" } };
       } catch(e) {
-        results.push(null);
-        setSceneImages(prev=>{ const n=[...prev]; n[i]={img:null,url:null,photographer:"error"}; return n; });
+        return { idx: i, result: { type:"fallback", img:null, url:null, photographer:"error: "+e.message } };
       }
-      await sleep(200);
+    });
+
+    // Update state as each resolves
+    for (const p of promises) {
+      p.then(({ idx, result }) => {
+        setSceneImages(prev => { const n=[...prev]; n[idx]=result; return n; });
+      });
     }
+    // Wait for all to finish
+    await Promise.all(promises);
     setImagesFetching(false); setImagesFetched(true);
-    return results;
   };
 
   const goToBuild = async () => {
