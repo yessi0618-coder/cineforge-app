@@ -64,6 +64,16 @@ async function searchPexels(query) {
   return null;
 }
 
+// Load local uploaded file as image — NO crossOrigin on blob URLs (causes taint)
+function loadLocalImage(file) {
+  return new Promise(res => {
+    const img = new Image();
+    img.onload = () => res(img);
+    img.onerror = () => res(null);
+    img.src = URL.createObjectURL(file);
+  });
+}
+
 // ── Canvas helpers ────────────────────────────────────────────────────────────
 function roundRect(ctx,x,y,w,h,r=6){
   ctx.beginPath();ctx.moveTo(x+r,y);ctx.lineTo(x+w-r,y);ctx.quadraticCurveTo(x+w,y,x+w,y+r);
@@ -187,8 +197,10 @@ function SceneCard({ scene, idx, total, onChange, onRemove, onAdd }) {
     if (file.type.startsWith("video/")) {
       onChange(idx, { ...scene, media:{ kind:"video", img:null, src:null, credit:`📁 ${file.name}`, videoUrl:url, videoFile:file } });
     } else {
+      // No crossOrigin on blob URLs — it breaks canvas drawing
       const img = new Image();
-      img.onload = () => onChange(idx, { ...scene, media:{ kind:"image", img, src:url, credit:`📁 ${file.name}` } });
+      img.onload = () => onChange(idx, { ...scene, media:{ kind:"image", img, src:url, credit:`📁 ${file.name}`, isLocal:true } });
+      img.onerror = () => console.warn("Image load failed");
       img.src = url;
     }
     setPanel(null);
@@ -499,42 +511,83 @@ export default function CineForge() {
     rec.start(250); src.start(0);
     log(`▶ Recording (${mime})`);
 
-    // Render
-    let gf=0;
-    for(let si=0;si<sl.length;si++){
-      const sc=sl[si]; const dur=ranges[si].dur; const m=sc.media;
-      setBuildPct(22+Math.round((si/total)*68));
-      const mediaLabel=m?.kind==="video"?"custom video":m?.img?"photo":"gradient";
-      log(`  🎨 Scene ${si+1}/${total}: ${mediaLabel} · ${dur.toFixed(1)}s`);
-      if(m?.videoEl){ try{m.videoEl.currentTime=0;await m.videoEl.play();}catch(e){} }
-      const fc=Math.ceil(dur*30); const fdms=(dur/fc)*1000;
-      for(let f=0;f<fc;f++){
-        const ts=f/30; const prog=f/fc;
+    // Render using real-time RAF loop — synced to actual audio playback
+    // This is MUCH faster than frame-by-frame sleep and never stalls
+    log("🎨 Rendering scenes in real time...");
+
+    await new Promise(resolve => {
+      let sceneIdx = 0;
+      let sceneStartTime = null;
+
+      // Start playing uploaded videos for first scene
+      const startScene = (si) => {
+        const m = sl[si]?.media;
+        if(m?.videoEl){ try{m.videoEl.currentTime=0;m.videoEl.play();}catch(e){} }
+        sceneStartTime = null; // will be set on first frame of this scene
+      };
+      startScene(0);
+
+      const render = (timestamp) => {
+        if(sceneIdx >= sl.length){ resolve(); return; }
+
+        if(sceneStartTime===null) sceneStartTime = timestamp;
+        const elapsed = (timestamp - sceneStartTime) / 1000; // seconds into current scene
+        const si = sceneIdx;
+        const sc = sl[si];
+        const dur = ranges[si].dur;
+        const m = sc.media;
+        const prog = Math.min(elapsed / dur, 1);
+
+        // Draw background
         ctx.clearRect(0,0,1280,720);
         if(m?.videoEl&&m.videoEl.readyState>=2){
           const v=m.videoEl,vw=v.videoWidth,vh=v.videoHeight,sc2=Math.max(1280/vw,720/vh);
           ctx.drawImage(v,(1280-vw*sc2)/2,(720-vh*sc2)/2,vw*sc2,vh*sc2);
         } else if(m?.img){
-          drawImgCover(ctx,m.img,(prog-.5)*50);
+          // For local images (no crossOrigin), catch any taint errors
+          try {
+            drawImgCover(ctx,m.img,(prog-.5)*50);
+          } catch(e) {
+            drawGradient(ctx,si); // fallback if tainted
+          }
         } else {
           drawGradient(ctx,si);
         }
-        drawOverlay(ctx,overlay,gf);
-        if(showTitle&&si===0&&ts<3){
-          const a=ts<.6?ts/.6:ts>2.4?1-(ts-2.4)/.6:1;
+
+        drawOverlay(ctx,overlay,0);
+
+        // Title card on first scene
+        if(showTitle&&si===0&&elapsed<3){
+          const a=elapsed<.6?elapsed/.6:elapsed>2.4?1-(elapsed-2.4)/.6:1;
           ctx.save(); ctx.globalAlpha=a;
           ctx.fillStyle="rgba(0,0,0,.65)"; roundRect(ctx,80,270,1120,180,12); ctx.fill();
           ctx.font="bold 48px Georgia"; ctx.fillStyle="#fff"; ctx.textAlign="center";
           ctx.fillText(videoTitle||"Your Video",640,360,1060); ctx.restore();
         }
-        const sub=buildChunks(sc.narration,dur).find(c=>ts>=c.start&&ts<c.end);
-        if(sub) drawSub(ctx,sub.text,subSt,bars);
-        gf++; await sleep(Math.max(1,fdms*.7));
-      }
-      if(m?.videoEl) try{m.videoEl.pause();}catch(e){}
-    }
 
-    // Outro
+        // Subtitles
+        const sub=buildChunks(sc.narration,dur).find(ch=>elapsed>=ch.start&&elapsed<ch.end);
+        if(sub) drawSub(ctx,sub.text,subSt,bars);
+
+        // Progress update
+        const overallProg = (si + prog) / sl.length;
+        setBuildPct(22 + Math.round(overallProg * 68));
+
+        // Advance scene when done
+        if(elapsed >= dur){
+          log(`  ✓ Scene ${si+1}/${sl.length} complete`);
+          if(m?.videoEl) try{m.videoEl.pause();}catch(e){}
+          sceneIdx++;
+          if(sceneIdx < sl.length){ startScene(sceneIdx); }
+          else{ resolve(); return; }
+        }
+
+        requestAnimationFrame(render);
+      };
+      requestAnimationFrame(render);
+    });
+
+    // Outro card — 2 seconds
     ctx.fillStyle="#050508"; ctx.fillRect(0,0,1280,720);
     if(videoTitle){ ctx.font="bold 40px Georgia"; ctx.fillStyle="#fff"; ctx.textAlign="center"; ctx.fillText(videoTitle,640,340,1100); }
     ctx.font="22px Arial"; ctx.fillStyle="#4f8ef7"; ctx.textAlign="center"; ctx.fillText("Like · Share · Subscribe",640,400);
